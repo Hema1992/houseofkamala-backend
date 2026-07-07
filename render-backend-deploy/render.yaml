@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: houseofkamala-backend
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: MONGODB_URI
+        sync: false
+      - key: CORS_ORIGIN
+        value: https://houseofkamala.com,https://www.houseofkamala.com
+      - key: PUBLIC_API_URL
+        value: https://api.houseofkamala.com
+
