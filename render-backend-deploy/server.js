@@ -718,13 +718,22 @@ app.patch('/api/orders/:id/status', async (req, res) => {
 });
 
 // Upload image only and return a URL the frontend can save in MongoDB.
-app.post('/api/products/upload', upload.single('image'), (req, res) => {
+app.post('/api/products/upload', (req, res) => {
+  upload.single('image')(req, res, (err) => {
+    if (err) {
+      return res.status(500).json({
+        message: 'Image upload failed',
+        error: err.message,
+      });
+    }
+
   if (!req.file) {
     return res.status(400).json({ message: 'No image file uploaded' });
   }
 
   res.status(201).json({
     imageUrl: `${publicApiUrl}/uploads/${req.file.filename}`,
+  });
   });
 });
 
