@@ -214,7 +214,64 @@ const hashResetCode = (code) => {
   return crypto.createHash('sha256').update(code).digest('hex');
 };
 
+function sendBrevoEmail(to, code) {
+  const { BREVO_API_KEY, SMTP_FROM, SMTP_USER, EMAIL_FROM_NAME } = process.env;
+  if (!BREVO_API_KEY) return null;
+
+  const fromEmail = (SMTP_FROM || SMTP_USER || 'no-reply@houseofkamala.com')
+    .replace(/^.*<([^>]+)>.*$/, '$1')
+    .trim();
+  const payload = JSON.stringify({
+    sender: {
+      name: EMAIL_FROM_NAME || 'House of Kamala',
+      email: fromEmail,
+    },
+    to: [{ email: to }],
+    subject: 'Your House of Kamala password reset code',
+    textContent: `Your verification code is ${code}. It expires in 10 minutes.`,
+  });
+
+  return new Promise((resolve, reject) => {
+    const request = require('https').request({
+      hostname: 'api.brevo.com',
+      path: '/v3/smtp/email',
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'api-key': BREVO_API_KEY,
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        if (response.statusCode >= 200 && response.statusCode < 300) {
+          resolve(true);
+          return;
+        }
+
+        let message = 'Brevo email request failed';
+        try {
+          const parsed = JSON.parse(data || '{}');
+          message = parsed.message || parsed.error || message;
+        } catch (err) {
+          if (data) message = data;
+        }
+        reject(new Error(message));
+      });
+    });
+
+    request.on('error', reject);
+    request.write(payload);
+    request.end();
+  });
+}
+
 async function sendResetEmail(to, code) {
+  const brevoResult = await sendBrevoEmail(to, code);
+  if (brevoResult) return true;
+
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
     if (process.env.NODE_ENV !== 'production') {
