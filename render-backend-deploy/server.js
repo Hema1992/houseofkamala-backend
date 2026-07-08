@@ -212,14 +212,22 @@ const hashResetCode = (code) => {
 async function sendResetEmail(to, code) {
   const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM } = process.env;
   if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
-    console.log(`Password reset code for ${to}: ${code}`);
-    return false;
+    if (process.env.NODE_ENV !== 'production') {
+      console.log(`Password reset code for ${to}: ${code}`);
+      return false;
+    }
+    throw new Error('Email service is not configured');
+  }
+
+  const smtpPort = Number(SMTP_PORT);
+  if (!Number.isInteger(smtpPort)) {
+    throw new Error('SMTP_PORT must be a number');
   }
 
   const transporter = nodemailer.createTransport({
     host: SMTP_HOST,
-    port: Number(SMTP_PORT),
-    secure: Number(SMTP_PORT) === 465,
+    port: smtpPort,
+    secure: smtpPort === 465,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
 
