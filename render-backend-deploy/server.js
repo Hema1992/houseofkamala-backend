@@ -4,11 +4,16 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const dns = require('dns');
 const fs = require('fs');
 
 
 const path = require('path');
 const upload = require('./upload-middleware');
+
+if (typeof dns.setDefaultResultOrder === 'function') {
+  dns.setDefaultResultOrder('ipv4first');
+}
 
 const envPath = path.join(__dirname, '.env');
 if (fs.existsSync(envPath)) {
