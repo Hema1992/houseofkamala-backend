@@ -228,6 +228,9 @@ async function sendResetEmail(to, code) {
     host: SMTP_HOST,
     port: smtpPort,
     secure: smtpPort === 465,
+    family: 4,
+    connectionTimeout: 15000,
+    greetingTimeout: 15000,
     auth: { user: SMTP_USER, pass: SMTP_PASS },
   });
 
