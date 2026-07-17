@@ -268,7 +268,7 @@ function sendTwilioSms(to, code) {
   });
 }
 
-const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v5-identifier';
+const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v6-message';
 
 function logMsg91(event, details = {}) {
   console.log(JSON.stringify({ scope: 'msg91-login', release: MSG91_VERIFY_RELEASE, event, ...details }));
@@ -287,6 +287,7 @@ function decodeJwtPayload(accessToken) {
 function getMsg91VerifiedIdentifierCandidates(verification, accessToken) {
   const jwt = decodeJwtPayload(accessToken);
   const candidates = [
+    ['response.message', verification?.type === 'success' ? verification?.message : null],
     ['response.identifier', verification?.identifier],
     ['response.mobile', verification?.mobile],
     ['response.phone', verification?.phone],
