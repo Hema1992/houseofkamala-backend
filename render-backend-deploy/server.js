@@ -268,7 +268,7 @@ function sendTwilioSms(to, code) {
   });
 }
 
-const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v6-message';
+const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v7-final';
 
 function logMsg91(event, details = {}) {
   console.log(JSON.stringify({ scope: 'msg91-login', release: MSG91_VERIFY_RELEASE, event, ...details }));
@@ -628,7 +628,6 @@ app.post('/api/auth/request-login-otp', async (req, res) => {
     if (!phone) return res.status(400).json({ message: 'Enter a valid mobile number with country code' });
 
     let user = await User.findOne({ phone });
-    const existingUser = Boolean(user);
     if (!user) {
       user = await User.create({
         name: name || `Customer ${phone.slice(-4)}`,
@@ -732,6 +731,7 @@ app.post('/api/auth/msg91-login', async (req, res) => {
     }
 
     let user = await User.findOne({ phone });
+    const existingUser = Boolean(user);
     if (!user) {
       user = await User.create({
         name: `Customer ${phone.slice(-4)}`,
