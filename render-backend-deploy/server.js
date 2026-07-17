@@ -268,7 +268,7 @@ function sendTwilioSms(to, code) {
   });
 }
 
-const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v3';
+const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v4-json';
 
 function logMsg91(event, details = {}) {
   console.log(JSON.stringify({ scope: 'msg91-login', release: MSG91_VERIFY_RELEASE, event, ...details }));
@@ -281,10 +281,11 @@ function verifyMsg91AccessToken(accessToken) {
     accessTokenPresent: Boolean(accessToken),
     accessTokenLength: accessToken ? accessToken.length : 0,
     jwtSegments: accessToken ? accessToken.split('.').length : 0,
+    requestFormat: 'application/json',
   });
   if (!authkey) return Promise.reject(new Error('MSG91 authentication is not configured'));
 
-  const payload = new URLSearchParams({ authkey, 'access-token': accessToken }).toString();
+  const payload = JSON.stringify({ authkey, 'access-token': accessToken });
   return new Promise((resolve, reject) => {
     const request = require('https').request({
       hostname: 'control.msg91.com',
@@ -293,7 +294,7 @@ function verifyMsg91AccessToken(accessToken) {
       headers: {
         authkey,
         'access-token': accessToken,
-        'content-type': 'application/x-www-form-urlencoded',
+        'content-type': 'application/json',
         'content-length': Buffer.byteLength(payload),
       },
     }, (response) => {
