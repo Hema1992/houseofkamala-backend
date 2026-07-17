@@ -268,8 +268,20 @@ function sendTwilioSms(to, code) {
   });
 }
 
+const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v3';
+
+function logMsg91(event, details = {}) {
+  console.log(JSON.stringify({ scope: 'msg91-login', release: MSG91_VERIFY_RELEASE, event, ...details }));
+}
+
 function verifyMsg91AccessToken(accessToken) {
   const authkey = process.env.MSG91_AUTH_KEY;
+  logMsg91('verification-request-created', {
+    authkeyConfigured: Boolean(authkey),
+    accessTokenPresent: Boolean(accessToken),
+    accessTokenLength: accessToken ? accessToken.length : 0,
+    jwtSegments: accessToken ? accessToken.split('.').length : 0,
+  });
   if (!authkey) return Promise.reject(new Error('MSG91 authentication is not configured'));
 
   const payload = new URLSearchParams({ authkey, 'access-token': accessToken }).toString();
@@ -290,16 +302,33 @@ function verifyMsg91AccessToken(accessToken) {
       response.on('end', () => {
         try {
           const parsed = JSON.parse(data || '{}');
+          logMsg91('verification-response-received', {
+            httpStatus: response.statusCode,
+            responseType: parsed.type || null,
+            responseCode: parsed.code || null,
+            responseMessage: parsed.message || null,
+            hasVerifiedIdentifier: Boolean(
+              parsed.identifier || parsed.mobile || parsed.phone ||
+              parsed.data?.identifier || parsed.data?.mobile || parsed.data?.phone
+            ),
+          });
           if (response.statusCode >= 200 && response.statusCode < 300 && parsed.type === 'success') {
             return resolve(parsed);
           }
           reject(new Error(parsed.message || 'MSG91 verification failed'));
         } catch (err) {
+          logMsg91('verification-response-invalid', {
+            httpStatus: response.statusCode,
+            responseBytes: Buffer.byteLength(data || ''),
+          });
           reject(new Error('Invalid response from MSG91'));
         }
       });
     });
-    request.on('error', reject);
+    request.on('error', (err) => {
+      logMsg91('verification-network-error', { errorCode: err.code || null, errorMessage: err.message });
+      reject(err);
+    });
     request.write(payload);
     request.end();
   });
@@ -557,6 +586,7 @@ app.post('/api/auth/request-login-otp', async (req, res) => {
     if (!phone) return res.status(400).json({ message: 'Enter a valid mobile number with country code' });
 
     let user = await User.findOne({ phone });
+    const existingUser = Boolean(user);
     if (!user) {
       user = await User.create({
         name: name || `Customer ${phone.slice(-4)}`,
@@ -629,9 +659,17 @@ app.post('/api/auth/verify-login-otp', async (req, res) => {
 });
 
 app.post('/api/auth/msg91-login', async (req, res) => {
+  res.setHeader('X-Backend-Release', MSG91_VERIFY_RELEASE);
   try {
     const phone = normalizePhone(req.body.phone);
     const accessToken = String(req.body.accessToken || '').trim();
+    logMsg91('login-request-received', {
+      bodyFields: Object.keys(req.body || {}).sort(),
+      phonePresent: Boolean(phone),
+      phoneLastFour: phone ? phone.slice(-4) : null,
+      accessTokenPresent: Boolean(accessToken),
+      accessTokenLength: accessToken.length,
+    });
     if (!phone || !accessToken) return res.status(400).json({ message: 'Phone number and verification token are required' });
 
     const verification = await verifyMsg91AccessToken(accessToken);
@@ -640,6 +678,11 @@ app.post('/api/auth/msg91-login', async (req, res) => {
       verification.data?.identifier || verification.data?.mobile || verification.data?.phone || ''
     );
     if (!verifiedValue || normalizePhone(verifiedValue) !== phone) {
+      logMsg91('verified-identifier-mismatch', {
+        verifiedIdentifierPresent: Boolean(verifiedValue),
+        verifiedLastFour: verifiedValue ? normalizePhone(verifiedValue).slice(-4) : null,
+        submittedLastFour: phone.slice(-4),
+      });
       return res.status(401).json({ message: 'Verified mobile number does not match' });
     }
 
@@ -652,9 +695,11 @@ app.post('/api/auth/msg91-login', async (req, res) => {
         role: 'customer',
       });
     }
+    logMsg91('login-completed', { userId: String(user._id), existingUser });
     res.json({ user: toPublicUser(user) });
   } catch (err) {
     const configurationError = err.message === 'MSG91 authentication is not configured';
+    logMsg91('login-failed', { errorMessage: err.message || 'MSG91 login failed' });
     res.status(configurationError ? 503 : 401).json({ message: err.message || 'MSG91 login failed' });
   }
 });
@@ -1107,5 +1152,5 @@ app.delete('/api/products/:id', async (req, res) => {
 
 // Start server
 app.listen(port, () => {
-  console.log(`Server running on ${publicApiUrl}`);
+  console.log(`Server running on ${publicApiUrl} (${MSG91_VERIFY_RELEASE})`);
 });
