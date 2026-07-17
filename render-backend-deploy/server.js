@@ -279,6 +279,8 @@ function verifyMsg91AccessToken(accessToken) {
       path: '/api/v5/widget/verifyAccessToken',
       method: 'POST',
       headers: {
+        authkey,
+        'access-token': accessToken,
         'content-type': 'application/x-www-form-urlencoded',
         'content-length': Buffer.byteLength(payload),
       },
