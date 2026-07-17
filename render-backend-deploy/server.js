@@ -268,10 +268,50 @@ function sendTwilioSms(to, code) {
   });
 }
 
-const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v4-json';
+const MSG91_VERIFY_RELEASE = 'msg91-verify-2026-07-17-v5-identifier';
 
 function logMsg91(event, details = {}) {
   console.log(JSON.stringify({ scope: 'msg91-login', release: MSG91_VERIFY_RELEASE, event, ...details }));
+}
+
+function decodeJwtPayload(accessToken) {
+  try {
+    const parts = String(accessToken || '').split('.');
+    if (parts.length !== 3) return {};
+    return JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+  } catch (_err) {
+    return {};
+  }
+}
+
+function getMsg91VerifiedIdentifierCandidates(verification, accessToken) {
+  const jwt = decodeJwtPayload(accessToken);
+  const candidates = [
+    ['response.identifier', verification?.identifier],
+    ['response.mobile', verification?.mobile],
+    ['response.phone', verification?.phone],
+    ['response.mobileNumber', verification?.mobileNumber],
+    ['response.mobile_number', verification?.mobile_number],
+    ['response.data.identifier', verification?.data?.identifier],
+    ['response.data.mobile', verification?.data?.mobile],
+    ['response.data.phone', verification?.data?.phone],
+    ['response.data.mobileNumber', verification?.data?.mobileNumber],
+    ['response.data.mobile_number', verification?.data?.mobile_number],
+    ['jwt.identifier', jwt?.identifier],
+    ['jwt.mobile', jwt?.mobile],
+    ['jwt.phone', jwt?.phone],
+    ['jwt.mobileNumber', jwt?.mobileNumber],
+    ['jwt.mobile_number', jwt?.mobile_number],
+    ['jwt.sub', jwt?.sub],
+    ['jwt.data.identifier', jwt?.data?.identifier],
+    ['jwt.data.mobile', jwt?.data?.mobile],
+    ['jwt.data.phone', jwt?.data?.phone],
+  ];
+
+  return candidates
+    .filter(([, value]) => typeof value === 'string' || typeof value === 'number')
+    .map(([source, value]) => ({ source, value: String(value) }))
+    .filter(({ value }) => Boolean(normalizePhone(value)));
 }
 
 function verifyMsg91AccessToken(accessToken) {
@@ -674,14 +714,17 @@ app.post('/api/auth/msg91-login', async (req, res) => {
     if (!phone || !accessToken) return res.status(400).json({ message: 'Phone number and verification token are required' });
 
     const verification = await verifyMsg91AccessToken(accessToken);
-    const verifiedValue = String(
-      verification.identifier || verification.mobile || verification.phone ||
-      verification.data?.identifier || verification.data?.mobile || verification.data?.phone || ''
-    );
-    if (!verifiedValue || normalizePhone(verifiedValue) !== phone) {
+    const identifierCandidates = getMsg91VerifiedIdentifierCandidates(verification, accessToken);
+    const verifiedCandidate = identifierCandidates.find(({ value }) => normalizePhone(value) === phone);
+    logMsg91('verified-identifiers-extracted', {
+      candidateCount: identifierCandidates.length,
+      candidateSources: identifierCandidates.map(({ source }) => source),
+      matchingSource: verifiedCandidate?.source || null,
+    });
+    if (!verifiedCandidate) {
       logMsg91('verified-identifier-mismatch', {
-        verifiedIdentifierPresent: Boolean(verifiedValue),
-        verifiedLastFour: verifiedValue ? normalizePhone(verifiedValue).slice(-4) : null,
+        verifiedIdentifierPresent: identifierCandidates.length > 0,
+        verifiedLastFour: identifierCandidates[0] ? normalizePhone(identifierCandidates[0].value).slice(-4) : null,
         submittedLastFour: phone.slice(-4),
       });
       return res.status(401).json({ message: 'Verified mobile number does not match' });
