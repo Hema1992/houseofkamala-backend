@@ -149,11 +149,11 @@ const Product = mongoose.model('Product', productSchema);
 
 const userSchema = new mongoose.Schema({
   name: String,
-  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-  passwordHash: { type: String, required: true },
-  salt: { type: String, required: true },
+  email: { type: String, unique: true, sparse: true, lowercase: true, trim: true },
+  passwordHash: String,
+  salt: String,
   role: { type: String, enum: ['admin', 'customer'], default: 'customer' },
-  phone: String,
+  phone: { type: String, unique: true, sparse: true, trim: true },
   address: {
     name: String,
     phone: String,
@@ -165,6 +165,10 @@ const userSchema = new mongoose.Schema({
   resetCodeHash: String,
   resetCodeExpiresAt: Date,
   resetVerifiedUntil: Date,
+  loginOtpHash: String,
+  loginOtpExpiresAt: Date,
+  loginOtpAttempts: { type: Number, default: 0 },
+  loginOtpLastSentAt: Date,
 }, { timestamps: true });
 const User = mongoose.model('User', userSchema);
 
@@ -213,6 +217,91 @@ const hashPassword = (password, salt) => {
 const hashResetCode = (code) => {
   return crypto.createHash('sha256').update(code).digest('hex');
 };
+
+const normalizePhone = (value) => {
+  const raw = String(value || '').trim();
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length === 10) return `+91${digits}`;
+  if (digits.length === 12 && digits.startsWith('91')) return `+${digits}`;
+  if (raw.startsWith('+') && digits.length >= 10 && digits.length <= 15) return `+${digits}`;
+  return '';
+};
+
+function sendTwilioSms(to, code) {
+  const { TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_PHONE_NUMBER, TWILIO_MESSAGING_SERVICE_SID } = process.env;
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || (!TWILIO_PHONE_NUMBER && !TWILIO_MESSAGING_SERVICE_SID)) return null;
+
+  const params = new URLSearchParams({
+    To: to,
+    Body: `Your House of Kamala login OTP is ${code}. It expires in 10 minutes. Do not share it.`,
+  });
+  if (TWILIO_MESSAGING_SERVICE_SID) params.set('MessagingServiceSid', TWILIO_MESSAGING_SERVICE_SID);
+  else params.set('From', TWILIO_PHONE_NUMBER);
+
+  const payload = params.toString();
+  return new Promise((resolve, reject) => {
+    const request = require('https').request({
+      hostname: 'api.twilio.com',
+      path: `/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`,
+      method: 'POST',
+      auth: `${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`,
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-length': Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        if (response.statusCode >= 200 && response.statusCode < 300) return resolve(true);
+        try {
+          const parsed = JSON.parse(data || '{}');
+          reject(new Error(parsed.message || 'SMS delivery failed'));
+        } catch (err) {
+          reject(new Error('SMS delivery failed'));
+        }
+      });
+    });
+    request.on('error', reject);
+    request.write(payload);
+    request.end();
+  });
+}
+
+function verifyMsg91AccessToken(accessToken) {
+  const authkey = process.env.MSG91_AUTH_KEY;
+  if (!authkey) return Promise.reject(new Error('MSG91 authentication is not configured'));
+
+  const payload = new URLSearchParams({ authkey, 'access-token': accessToken }).toString();
+  return new Promise((resolve, reject) => {
+    const request = require('https').request({
+      hostname: 'control.msg91.com',
+      path: '/api/v5/widget/verifyAccessToken',
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-length': Buffer.byteLength(payload),
+      },
+    }, (response) => {
+      let data = '';
+      response.on('data', (chunk) => { data += chunk; });
+      response.on('end', () => {
+        try {
+          const parsed = JSON.parse(data || '{}');
+          if (response.statusCode >= 200 && response.statusCode < 300 && parsed.type === 'success') {
+            return resolve(parsed);
+          }
+          reject(new Error(parsed.message || 'MSG91 verification failed'));
+        } catch (err) {
+          reject(new Error('Invalid response from MSG91'));
+        }
+      });
+    });
+    request.on('error', reject);
+    request.write(payload);
+    request.end();
+  });
+}
 
 function sendBrevoEmail(to, code) {
   const { BREVO_API_KEY, SMTP_FROM, SMTP_USER, EMAIL_FROM_NAME } = process.env;
@@ -309,14 +398,15 @@ async function sendResetEmail(to, code) {
 const toPublicUser = (user) => ({
   id: user._id.toString(),
   name: user.name,
-  email: user.email,
+  email: user.email?.endsWith('@phone.houseofkamala.local') ? '' : (user.email || ''),
+  phone: user.phone || '',
   role: user.role,
 });
 
 const toUserProfile = (user) => ({
   id: user._id.toString(),
   name: user.name,
-  email: user.email,
+  email: user.email?.endsWith('@phone.houseofkamala.local') ? '' : (user.email || ''),
   role: user.role,
   phone: user.phone || user.address?.phone || '',
   address: user.address || undefined,
@@ -367,16 +457,31 @@ const razorpayRequest = (method, apiPath, payload) => {
 };
 
 async function ensureDefaultAdmin() {
-  const email = 'kamalahouseofsaree@gmail.com';
+  const email = String(process.env.ADMIN_EMAIL || (process.env.NODE_ENV !== 'production' ? 'kamalahouseofsaree@gmail.com' : '')).toLowerCase().trim();
+  const password = String(process.env.ADMIN_PASSWORD || (process.env.NODE_ENV !== 'production' ? 'admin123' : ''));
+  if (!email || !password) {
+    console.warn('Admin bootstrap skipped: ADMIN_EMAIL and ADMIN_PASSWORD are required in production');
+    return;
+  }
+  if (password.length < 12 && process.env.NODE_ENV === 'production') {
+    console.warn('Admin bootstrap skipped: ADMIN_PASSWORD must be at least 12 characters in production');
+    return;
+  }
   const existing = await User.findOne({ email });
-  if (existing) return;
-
   const salt = crypto.randomBytes(16).toString('hex');
+  if (existing) {
+    existing.salt = salt;
+    existing.passwordHash = hashPassword(password, salt);
+    existing.role = 'admin';
+    await existing.save();
+    return;
+  }
+
   await User.create({
     name: 'Vastra Admin',
     email,
     salt,
-    passwordHash: hashPassword('admin123', salt),
+    passwordHash: hashPassword(password, salt),
     role: 'admin',
   });
 }
@@ -427,6 +532,128 @@ app.post('/api/auth/login', async (req, res) => {
     res.json({ user: toPublicUser(user) });
   } catch (err) {
     res.status(400).json({ message: err.message || 'Login failed' });
+  }
+});
+
+app.post('/api/auth/admin-login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const user = await User.findOne({ email: String(email || '').toLowerCase().trim(), role: 'admin' });
+    if (!user || !user.salt || !user.passwordHash || hashPassword(password || '', user.salt) !== user.passwordHash) {
+      return res.status(401).json({ message: 'Invalid administrator credentials' });
+    }
+    res.json({ user: toPublicUser(user) });
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Admin login failed' });
+  }
+});
+
+app.post('/api/auth/request-login-otp', async (req, res) => {
+  try {
+    const phone = normalizePhone(req.body.phone);
+    const name = String(req.body.name || '').trim();
+    if (!phone) return res.status(400).json({ message: 'Enter a valid mobile number with country code' });
+
+    let user = await User.findOne({ phone });
+    if (!user) {
+      user = await User.create({
+        name: name || `Customer ${phone.slice(-4)}`,
+        phone,
+        email: `${phone.replace(/\D/g, '')}@phone.houseofkamala.local`,
+        role: 'customer',
+      });
+    } else if (name && (!user.name || user.name.startsWith('Customer '))) {
+      user.name = name;
+    }
+
+    const lastSent = user.loginOtpLastSentAt?.getTime() || 0;
+    if (Date.now() - lastSent < 30 * 1000) {
+      return res.status(429).json({ message: 'Please wait 30 seconds before requesting another OTP' });
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    user.loginOtpHash = hashResetCode(code);
+    user.loginOtpExpiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    user.loginOtpAttempts = 0;
+    user.loginOtpLastSentAt = new Date();
+    await user.save();
+
+    const smsSent = await sendTwilioSms(phone, code);
+    if (!smsSent && process.env.NODE_ENV === 'production') {
+      user.loginOtpHash = undefined;
+      user.loginOtpExpiresAt = undefined;
+      await user.save();
+      return res.status(503).json({ message: 'SMS service is not configured' });
+    }
+    if (!smsSent) console.log(`Login OTP for ${phone}: ${code}`);
+
+    res.json({
+      message: smsSent ? `OTP sent to ${phone}` : 'OTP generated for local development',
+      devCode: smsSent ? undefined : code,
+    });
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'Could not send OTP' });
+  }
+});
+
+app.post('/api/auth/verify-login-otp', async (req, res) => {
+  try {
+    const phone = normalizePhone(req.body.phone);
+    const code = String(req.body.code || '').trim();
+    const user = phone ? await User.findOne({ phone }) : null;
+    if (!user || !/^\d{6}$/.test(code) || !user.loginOtpHash || !user.loginOtpExpiresAt) {
+      return res.status(400).json({ message: 'Request a new OTP and try again' });
+    }
+    if (user.loginOtpExpiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ message: 'OTP expired. Request a new one' });
+    }
+    if ((user.loginOtpAttempts || 0) >= 5) {
+      return res.status(429).json({ message: 'Too many incorrect attempts. Request a new OTP' });
+    }
+    if (hashResetCode(code) !== user.loginOtpHash) {
+      user.loginOtpAttempts = (user.loginOtpAttempts || 0) + 1;
+      await user.save();
+      return res.status(401).json({ message: 'Incorrect OTP' });
+    }
+
+    user.loginOtpHash = undefined;
+    user.loginOtpExpiresAt = undefined;
+    user.loginOtpAttempts = 0;
+    await user.save();
+    res.json({ user: toPublicUser(user) });
+  } catch (err) {
+    res.status(400).json({ message: err.message || 'OTP verification failed' });
+  }
+});
+
+app.post('/api/auth/msg91-login', async (req, res) => {
+  try {
+    const phone = normalizePhone(req.body.phone);
+    const accessToken = String(req.body.accessToken || '').trim();
+    if (!phone || !accessToken) return res.status(400).json({ message: 'Phone number and verification token are required' });
+
+    const verification = await verifyMsg91AccessToken(accessToken);
+    const verifiedValue = String(
+      verification.identifier || verification.mobile || verification.phone ||
+      verification.data?.identifier || verification.data?.mobile || verification.data?.phone || ''
+    );
+    if (!verifiedValue || normalizePhone(verifiedValue) !== phone) {
+      return res.status(401).json({ message: 'Verified mobile number does not match' });
+    }
+
+    let user = await User.findOne({ phone });
+    if (!user) {
+      user = await User.create({
+        name: `Customer ${phone.slice(-4)}`,
+        phone,
+        email: `${phone.replace(/\D/g, '')}@phone.houseofkamala.local`,
+        role: 'customer',
+      });
+    }
+    res.json({ user: toPublicUser(user) });
+  } catch (err) {
+    const configurationError = err.message === 'MSG91 authentication is not configured';
+    res.status(configurationError ? 503 : 401).json({ message: err.message || 'MSG91 login failed' });
   }
 });
 
